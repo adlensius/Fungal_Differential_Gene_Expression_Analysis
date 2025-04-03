@@ -1,5 +1,5 @@
 # Identifying the Influence of Cryptococcus Growth Media, Time, and K-mer Motifs on GAT201 Effect in Gene Expression Modelling
-This is a consulting project with as part of a dissertation presented for the degree of MSc in Statistics with Data Science.
+A consulting project as part of a dissertation presented for the degree of MSc in Statistics with Data Science.
 
 # Goal
 This report aims to identify experiment design factors and k-mer motifs that significantly affect GAT201 effect on gene expression
