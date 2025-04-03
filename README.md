@@ -2,7 +2,10 @@
 A consulting project as part of a dissertation presented for the degree of MSc in Statistics with Data Science.
 
 # Goal
-This report aims to identify experiment design factors and k-mer motifs that significantly affect GAT201 effect on gene expression
+This report aims to identify experiment design factors and k-mer motifs that significantly affect GAT201 effect on gene expression of Cryptococcus. Specifically, This report aims to answer the following two research questions.
+1. Which experiment design factors, i.e., growth media condition and amount of time passed after
+inoculation, significantly affect the GAT201 effect on gene expression level?
+2. Which k-mer motifs significantly affect the GAT201 effect on gene expression level?
 
 # Overview
 Gene expression data of 6795 Cryptococcus neoformans genes and the frequencies
@@ -21,11 +24,14 @@ motifs and GAT201. Finally, motif clustering was also done as a demonstration of
 multicollinearity. Model comparison was done with AIC to measure the models’ performances.
 
 # Content
-the final_fungal.Rmd is the main notebook consisting of all the codes to produce models, results, and graphics in the full report.
-
+* fungal_adlensius_report.pdf is the full report
+* the final_fungal.Rmd is the main notebook consisting of all the codes to produce models, results, and graphics in the full report.
 Note: Not all codes and results produced in the notebook is used in the main report. Some are simply for sanity checks.
+* counts_all.csv is the gene counts data
+* Gat201_samplesheet.csv is the metadata describing the samples code
+* The remaining csv files with file names starting with H99 are the k-mer motifs frequencies data
 
-fungal_adlensius_report.pdf is the full report
-counts_all.csv is the gene counts data
-Gat201_samplesheet.csv is the metadata describing the samples code
-The remaining csv files with file names starting with H99 are the k-mer motifs frequencies data
+# Author
+This dissertation is authored by Adlensius Fransiskus Djunaedi
+
+Supervised by Dr Natalia Bochkina and Dr Simon Taylor
