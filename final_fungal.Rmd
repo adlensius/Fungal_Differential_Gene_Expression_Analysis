@@ -1,0 +1,1361 @@
+---
+title: "fungal_analysis"
+output: html_document
+date: "2024-08-08"
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggfortify)
+library(cluster)
+library(factoextra)
+library(MASS)
+library(tidyr)
+library(dplyr)
+library(hablar)
+library(mltools)
+library(stringi)
+library(pheatmap)
+library(gplots)
+library(reshape2)
+library(tibble)
+library(glmnet)
+library(DESeq2)
+library(DHARMa)
+library(patchwork)
+library(ggvenn)
+library(remotes)
+```
+
+# Data
+
+```{r}
+# load count data
+df <- read.csv('counts_all.csv')
+rownames(df) <- df$Geneid
+df <- df[,-c(1:6)]
+
+# delete genes that don't have counts across all samples
+df <- df[-which(rowSums(df) == 0),]
+
+# load features
+features_all <- read.csv('Gat201_samplesheet.csv')
+rownames(features_all) <- features_all$Title
+features_all$Time <- as.factor(features_all$Time)
+features <- features_all[,c(2,5,7,9)]
+
+# load k-mers data: Need to edit the file - remove quotation mark
+df_2mer <- read.csv('H99_all_genes_promoter_500nt_2mer_counts.csv',
+                    comment.char = "#")
+
+df_3mer <- read.csv('H99_all_genes_promoter_500nt_3mer_counts.csv',
+                    comment.char = "#")
+
+df_4mer <- read.csv('H99_all_genes_promoter_500nt_4mer_counts.csv',
+                    comment.char = "#")
+
+df_5mer <- read.csv('H99_all_genes_promoter_500nt_5mer_counts.csv',
+                    comment.char = "#")
+
+# filter data to only include genes that we're working with
+df_2mer <- df_2mer %>% filter(Gene %in% rownames(df))
+df_3mer <- df_3mer %>% filter(Gene %in% rownames(df))
+df_4mer <- df_4mer %>% filter(Gene %in% rownames(df))
+df_5mer <- df_5mer %>% filter(Gene %in% rownames(df))
+
+
+
+```
+
+### Aggregate complementary sequences
+
+```{r}
+# reverse complement
+rev_comp <- function(seq){
+  return(stri_reverse(chartr('ATGC', 'TACG', seq)))
+}
+```
+
+```{r}
+get_agg_df <- function(df_kmer){
+  # get all k-mers name
+  motif <- colnames(df_kmer)[-1] # first column is gene name
+  
+  # initialise list
+  df_count <- list(Gene = df_kmer$Gene)
+  
+  # iterate over the set of motif
+  for (m in motif){
+    # if reverse complement already counted, just add it
+    if (rev_comp(m) %in% names(df_count)){
+      df_count[[rev_comp(m)]] <- df_count[[rev_comp(m)]] + df_kmer[[m]]
+    }
+    
+    # else, create new item
+    else{
+      df_count[[m]] <- df_kmer[[m]]
+    }
+  }
+  # convert to data frame
+  return(as.data.frame(df_count))
+}
+```
+
+```{r}
+# get aggregate df
+df_2mer_agg <- get_agg_df(df_2mer)
+df_3mer_agg <- get_agg_df(df_3mer)
+df_4mer_agg <- get_agg_df(df_4mer)
+df_5mer_agg <- get_agg_df(df_5mer)
+
+# all mers
+# combine all
+df_allmer_agg <- df_2mer_agg %>% cbind(., df_3mer_agg[-1]) %>%
+  cbind(., df_4mer_agg[-1]) %>% cbind(., df_5mer_agg[-1])
+```
+
+## Normalisation for EDA
+
+```{r}
+# make copy for normal approximation and normalisation
+# remove zero by adding 1
+df_copy <- df + 1
+
+# model log count
+df_norm <- log(df_copy)
+
+# get log median for each sample
+log_median <- log(apply(df_copy,2,median))
+
+# normalisation: subtract each row with a vector
+df_norm <- as.data.frame(scale(df_norm, center = log_median, scale=FALSE))
+```
+
+# PCA
+
+```{r}
+pca <- prcomp(t(df_norm))
+## make a scree plot
+pca.var <- pca$sdev^2
+pca.var.per <- round(pca.var/sum(pca.var)*100, 1)
+barplot(pca.var.per, main="Scree Plot", xlab="Principal Component", ylab="Percent Variation")
+```
+
+```{r}
+## Plot PCA with 2 PC
+pca.data <- data.frame(Sample=rownames(pca$x),
+  x1=pca$x[,1],
+  x2=pca$x[,2],
+  x3=pca$x[,3],
+  x4=pca$x[,4],
+  x5=pca$x[,5])
+
+pca.data <- cbind(pca.data, features)
+pca.data$Time <- as.factor(pca.data$Time)
+ 
+p_condition <- ggplot(data=pca.data, aes(x=x1, y=x2, colour=Condition, shape = Time)) +
+  geom_point() +
+  xlab(paste("PC1 - ", pca.var.per[1], "%", sep="")) +
+  ylab(paste("PC2 - ", pca.var.per[2], "%", sep="")) +
+  theme_bw() 
+p_condition
+
+ggsave("pc1pc2.pdf", plot = p_condition, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+p_GAT201 <- ggplot(data=pca.data, aes(x=x1, y=x3, colour=GAT201, shape = Time)) +
+  geom_point() +
+  xlab(paste("PC1 - ", pca.var.per[1], "%", sep="")) +
+  ylab(paste("PC3 - ", pca.var.per[3], "%", sep="")) +
+  theme_bw() 
+p_GAT201
+
+ggsave("pc1pc3.pdf", plot = p_GAT201, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+p_GAT201_2 <- ggplot(data=pca.data, aes(x=x2, y=x3, colour=GAT201, shape = Time)) +
+  geom_point() +
+  xlab(paste("PC2 - ", pca.var.per[2], "%", sep="")) +
+  ylab(paste("PC3 - ", pca.var.per[3], "%", sep="")) +
+  theme_bw() 
+p_GAT201_2
+
+ggsave("pc2pc3_g.pdf", plot = p_GAT201_2, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+p_c <- ggplot(data=pca.data, aes(x=x1, y=x3, colour=Condition, shape = Time)) +
+  geom_point() +
+  xlab(paste("PC1 - ", pca.var.per[1], "%", sep="")) +
+  ylab(paste("PC3 - ", pca.var.per[3], "%", sep="")) +
+  theme_bw() 
+p_c
+
+ggsave("pc1pc3_c.pdf", plot = p_c, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+p_g <- ggplot(data=pca.data, aes(x=x1, y=x3, colour=GAT201, shape = Time)) +
+  geom_point() +
+  xlab(paste("PC1 - ", pca.var.per[1], "%", sep="")) +
+  ylab(paste("PC3 - ", pca.var.per[3], "%", sep="")) +
+  theme_bw() 
+p_g
+ggsave("pc1pc3_c.pdf", plot = p_g, width = 10, height = 6, units = "in", dpi=300)
+```
+
+PCA plot suggests time dominates clustering. Condition effect seems to be present on time 120 and 30.
+
+GAT201 effect seems to be present for all time points
+
+PC1 and PC2 seems to describe about time. Four very distinct clusters
+
+PC1 also describe about condition/serum
+
+PC3 describe about GAT201 effect
+
+Since PC1 and PC2 describes most of the variance (78.8%), time dominates the variability
+
+```{r}
+## get the name of the top measurements (genes) that contribute
+## most to pc1.
+loading_scores <- pca$rotation[,1]
+gene_scores <- abs(loading_scores) ## get the magnitudes
+gene_score_ranked <- sort(gene_scores, decreasing=TRUE)
+top_10_genes <- names(gene_score_ranked[1:10])
+top_100_genes <- names(gene_score_ranked[1:100])
+```
+
+Results show that time from inoculation dominate the overall variance in gene expression
+
+# EDA: Data Plot
+
+## Make Stacked Data
+
+```{r}
+# make data frame for plotting with normalised data
+df_stack_norm <- as.data.frame(t(df_norm))
+
+df_stack_norm <- cbind(features, df_stack_norm)
+
+# make from wide to long df, stack the gene counts
+df_stack_norm <- df_stack_norm %>% pivot_longer(cols = starts_with('CNAG'),
+                                    names_to = 'Geneid',
+                                    values_to = 'Counts')
+```
+
+```{r}
+str(df_stack_norm)
+```
+
+## Plots
+
+```{r}
+# Get groups of replicates
+df_wt <- features_all %>% filter(GAT201 == 'WT')
+
+# sort by Condition then by time
+df_wt <- with(df_wt, df_wt[order(df_wt$Condition, df_wt$Time),])
+
+group_wt <- df_wt$Title
+
+df_del <- features_all %>% filter(GAT201 == 'del')
+
+# sort by Condition then by time
+df_del <- with(df_del, df_del[order(df_del$Condition, df_del$Time),])
+
+group_del <- df_del$Title
+```
+
+Define function to plot histograms of replicates
+
+```{r}
+hist_rep <- function(data, group_wt, group_del, GAT201, rep){
+  if (GAT201 == 'WT'){
+    group <- group_wt
+  }
+  
+  else if (GAT201 == 'del'){
+    group <- group_del
+  }
+  
+  else{
+    cat('unrecognized GAT201 code')
+  }
+  
+  # the index of the last group
+  index <- rep*4
+  
+  df_sample <- data %>% filter(Title %in% group[(index-3):index])
+  
+  # Combine replicates together to contrast distribution of strains
+  df_sample$Title <- substr(df_sample$Title,1,nchar(df_sample$Title)-2)
+  # return(df_sample)
+  p <- ggplot(df_sample, aes(x=Counts, fill = as.factor(Title))) +
+    geom_histogram( color='#e9ecef', alpha=0.5, position='identity') +
+    # ggtitle("Histogram of Replicates") +
+    xlab("Counts") +
+    ylab("Frequency") +
+    labs(fill="Sample") 
+  
+  return(p)
+  
+}
+```
+
+#### Are distributions of counts between replicates similar? yes
+
+```{r}
+p_del_list <- list()
+p_wt_list <- list()
+for (i in 1:6){
+  p_del_list[[i]] <- hist_rep(df_stack_norm, group_wt, group_del, GAT201 = 'del', rep = i)
+  p_wt_list[[i]] <- hist_rep(df_stack_norm, group_wt, group_del, GAT201 = 'WT', rep = i)
+}
+
+p_del <- p_del_list[[1]] + p_del_list[[2]] + p_del_list[[3]] + p_del_list[[4]] + p_del_list[[5]] + p_del_list[[6]]
+
+p_wt <- p_wt_list[[1]] + p_wt_list[[2]] + p_wt_list[[3]] + p_wt_list[[4]] + p_wt_list[[5]] + p_wt_list[[6]]
+
+
+# ggsave("p_del.pdf", plot = p_del, width = 10, height = 6, units = "in", dpi=300)
+# ggsave("p_wt.pdf", plot = p_wt, width = 10, height = 6, units = "in", dpi=300)
+```
+
+### Mean Variance
+
+```{r}
+# get mean and variance of gene counts
+mean_counts <- apply(df, 1, mean)
+variance_counts <- apply(df, 1, var)
+
+# plot against each other >> look for overdispersion
+df_mv <- data.frame(m = mean_counts, v = variance_counts)
+mv <- ggplot(df_mv) +
+  geom_point(aes(x=m, y=v)) +
+  scale_y_log10() +
+  scale_x_log10() +
+  geom_abline(intercept = 0, slope = 1, colour='#E41A1C') +
+  xlab("Mean counts per gene") +
+  ylab("Variance per gene")
+
+ggsave("mv.pdf", plot = mv, width = 10, height = 6, units = "in", dpi=300)
+
+```
+
+red line is mean = variance. over red line means over dispersed. use nb.
+
+#### Heatmaps
+
+```{r}
+heatmap_gene <- pheatmap(as.matrix(df_norm), color = bluered(100),
+         annotation_col = features[-1])
+
+ggsave(filename="heatmap_gene.pdf", plot = heatmap_gene, width = 10, height = 6, units = "in", dpi=300)
+```
+
+There's obvious clusters between time. Presence of GAT201 and Media also contributes to clustering.
+
+## K-mers EDA
+
+### Correlation
+
+```{r}
+# creating correlation matrix
+d <- df_2mer_agg %>% cbind(.,df_3mer_agg[-1]) %>%
+  cbind(.,df_4mer_agg[-1]) %>% cbind(.,df_5mer_agg[-1])
+
+corr_mat <- round(cor(d[,-1]),2)
+ 
+# reduce the size of correlation matrix
+melted_corr_mat_kmer <- melt(corr_mat)
+# head(melted_corr_mat)
+ 
+# plotting the correlation heatmap
+p_corr_all <- ggplot(data = melted_corr_mat_kmer, aes(x=Var1, y=Var2, 
+                                   fill=value)) + 
+geom_tile() +
+  scale_fill_gradient2(low = '#465DAA', high = '#AF011C', mid = 'white', 
+                       midpoint = 0, limit = c(-1,1), space = 'Lab', 
+                       name='correlation') +
+  labs(x = "Motif", y="Motif")
+
+ggsave(filename="p_corr_all.pdf", plot = p_corr_all, width = 10, height = 6, units = "in", dpi=300)
+```
+
+### PCA
+
+```{r}
+pca_kmer <- function(df_mer_agg){
+  pca_mer <- prcomp(t(df_mer_agg[,-1]))
+
+  
+  ## make a scree plot
+  pca.var_mer <- pca_mer$sdev^2
+  pca.var.per_mer <- round(pca.var_mer/sum(pca.var_mer)*100, 1)
+  
+  ## Plot PCA with 2 PC
+  pca.data_mer <- data.frame(Sample=colnames(df_mer_agg)[-1],
+    X=pca_mer$x[,1],
+    Y=pca_mer$x[,2])
+  
+   
+  p_mer <- ggplot(data=pca.data_mer, aes(x=X, y=Y)) +
+    geom_point() +
+    xlab(paste("PC1 - ", pca.var.per_mer[1], "%", sep="")) +
+    ylab(paste("PC2 - ", pca.var.per_mer[2], "%", sep="")) +
+    theme_bw() 
+  return(p_mer)
+}
+
+
+```
+
+```{r}
+p2 <- pca_kmer(df_2mer_agg) + ggtitle("PCA for 2-mer motifs")
+p3 <- pca_kmer(df_3mer_agg) + ggtitle("PCA for 3-mer motifs")
+p4 <- pca_kmer(df_4mer_agg) + ggtitle("PCA for 4-mer motifs")
+p5 <- pca_kmer(df_5mer_agg) + ggtitle("PCA for 5-mer motifs")
+pca_p <- p2 + p3 + p4 + p5
+
+ggsave(filename="pca_p.pdf", plot = pca_p, width = 10, height = 6, units = "in", dpi=300)
+```
+
+# Q1: DESeq2
+
+## Create data frame, gene in columns
+
+```{r}
+# create data: normal
+gene_norm <- as.data.frame(t(df_norm))
+gene_norm <- cbind(features, gene_norm)
+
+# create data: Negative Binomial (nb)
+gene_nb <- as.data.frame(t(df))
+
+# get log median for each sample
+log_median_nb <- log(apply(gene_nb,1,median))
+gene_nb <- cbind(log_median_nb, gene_nb)
+gene_nb <- cbind(features, gene_nb)
+```
+
+## Part 1: Subsetting data by time to test effect of GAT201 given condition
+
+Q: Is treatement (GAT201) effect the same across different conditions? (i.e., GAT201:Condition == 0)
+
+Want to know if having different conditions can affect the effect seen on GAT201 presence
+
+Step 1: Prepare Data
+
+```{r}
+filter_dds_df <- function(gene_nb, t){
+  
+  df_de <- gene_nb %>% pivot_longer(cols = starts_with('CNAG'),
+                                      names_to = 'Gene',
+                                      values_to = 'Counts') %>%
+    filter(Time == t) %>% # filtering
+    spread(key = Gene, value = Counts) %>%
+    column_to_rownames("Title") %>%
+    select(-c(colnames(features)[-1], "log_median_nb")) %>% 
+    t() %>%
+    as.data.frame()
+  
+  # coldata
+  features_de <- features_all %>% filter(Time == t)
+  
+  # rearranging data
+  idx <- match(colnames(df_de), rownames(features_de))
+  features_de <- features_de[idx,]
+  
+  return(list(df_de = df_de, features_de = features_de))
+}
+```
+
+```{r}
+dds_df_list <- list()
+dds_df_list$data_30 <- filter_dds_df(gene_nb, 30)
+dds_df_list$data_120 <- filter_dds_df(gene_nb, 120)
+dds_df_list$data_240 <- filter_dds_df(gene_nb, 240)
+```
+
+```{r}
+# making sure the row names in colData matches to column names in counts_data
+all(colnames(dds_df_list[[1]]$df_de) %in% rownames(dds_df_list[[1]]$features_de))
+
+# are they in the same order?
+all(colnames(dds_df_list[[1]]$df_de) == rownames(dds_df_list[[1]]$features_de))
+
+```
+
+```{r}
+dds_condition <- function(dds_df_list){
+  # construct a DESeqDataSet object
+  dds <- DESeqDataSetFromMatrix(countData = dds_df_list$df_de,
+                              colData = dds_df_list$features_de,
+                              design = ~ GAT201 + Condition + GAT201:Condition)
+
+  # pre-filtering: removing rows with low gene counts
+  # keeping rows that have at least 10 reads total
+  keep <- rowSums(counts(dds)) >= 10
+  dds <- dds[keep,]
+  
+  # set the factor level
+  # tell DESeq2 that reference level is untreated (to compare with treated)
+  dds$GAT201 <- relevel(dds$GAT201, ref = "del")
+  dds$Condition <- relevel(dds$Condition, ref = "R")
+  
+  # run deseq
+  dds <- DESeq(dds)
+  
+  # Interaction
+  res_int <- results(dds, name = "GAT201WT.ConditionRS", alpha = 0.05)
+  res_main <- results(dds, name = "Condition_RS_vs_R", alpha = 0.05)
+  res_total <- results(dds, contrast = list(c("Condition_RS_vs_R", 
+                                              "GAT201WT.ConditionRS")), 
+                       alpha = 0.05)
+  
+  return(list(res_int = res_int, res_main = res_main, res_total = res_total))
+}
+```
+
+### Results
+
+```{r}
+res_30 <- dds_condition(dds_df_list$data_30)
+res_120 <- dds_condition(dds_df_list$data_120)
+res_240 <- dds_condition(dds_df_list$data_240)
+```
+
+Just look at padj!
+
+#### Interaction Terms
+
+Condition effect on GAT201 effect (interaction) most prominent at time 240, but still very small amount of genes
+
+```{r}
+cat('condition:GAT201 time 30')
+summary(res_30$res_int)
+
+cat('condition:GAT201 time 120')
+summary(res_120$res_int)
+
+cat('condition:GAT201 time 240')
+summary(res_240$res_int)
+```
+
+#### Main effect of Condition
+
+```{r}
+cat('condition RS vs R time 30')
+summary(res_30$res_main)
+
+cat('condition:GAT201 time 120')
+summary(res_120$res_main)
+
+cat('condition:GAT201 time 240')
+summary(res_240$res_main)
+```
+
+#### Total effect of condition
+
+```{r}
+cat('condition:GAT201 + Condition time 30')
+summary(res_30$res_total)
+
+cat('condition:GAT201 time 120')
+summary(res_120$res_total)
+
+cat('condition:GAT201 time 240')
+summary(res_240$res_total)
+```
+
+## Part 2: Effect of Time
+
+Does treatment effect differ across time?
+
+```{r}
+# making sure the row names in colData matches to column names in counts_data
+all(colnames(df) %in% rownames(features_all))
+
+# are they in the same order?
+all(colnames(df) == rownames(features_all))
+
+```
+
+```{r}
+dds_time <- DESeqDataSetFromMatrix(countData = df,
+                              colData = features_all,
+                              design = ~ GAT201 + Time + GAT201:Time)
+
+# pre-filtering: removing rows with low gene counts
+# keeping rows that have at least 10 reads total
+keep_time <- rowSums(counts(dds_time)) >= 10
+dds_time <- dds_time[keep_time,]
+
+# set the factor level
+# tell DESeq2 that reference level is untreated (to compare with treated)
+dds_time$GAT201 <- relevel(dds_time$GAT201, ref = "del")
+dds_time$Time <- relevel(dds_time$Time, ref = "0")
+
+
+# run deseq
+dds_time <- DESeq(dds_time)
+```
+
+### Results
+
+#### Interaction terms
+
+```{r}
+cat('GAT201:Time30')
+summary(results(dds_time, name = "GAT201WT.Time30", alpha = 0.05))
+
+cat('GAT201:Time120')
+summary(results(dds_time, name = "GAT201WT.Time120", alpha = 0.05))
+
+cat('GAT201:Time240')
+res2 <- results(dds_time, name = "GAT201WT.Time240", alpha = 0.05)
+summary(res2)
+```
+
+See different interaction terms by changing name argument
+
+Treatment effect across time points differ for some but not all genes, surprising for time 30
+
+But we could see that time effect on gene expression levels are quite significant
+
+#### Main effect
+
+```{r}
+cat('GAT201:Time30')
+summary(results(dds_time, name = "Time_30_vs_0", alpha = 0.05))
+
+cat('GAT201:Time120')
+summary(results(dds_time, name = "Time_120_vs_0", alpha = 0.05))
+
+cat('GAT201:Time240')
+summary(results(dds_time, name = "Time_240_vs_0", alpha = 0.05))
+```
+
+#### Total Time effect
+
+Most are significant
+
+```{r}
+cat('Time 30 effect')
+summary(results(dds_time, contrast = list(c("Time_30_vs_0", "GAT201WT.Time30")), alpha = 0.05))
+
+cat('Time 120 effect')
+summary(results(dds_time, contrast = list(c("Time_120_vs_0", "GAT201WT.Time120")), alpha = 0.05))
+
+cat('Time 240 effect')
+summary(results(dds_time, contrast = list(c("Time_240_vs_0", "GAT201WT.Time240")), alpha = 0.05))
+```
+
+#### Total GAT201 Effect based on time
+
+Most effect at time 240 (40% significant)
+
+```{r}
+cat('GAT201 effect at Time 30 effect')
+summary(results(dds_time, contrast = list(c("GAT201WT.Time30", "GAT201_WT_vs_del")), alpha = 0.05))
+
+cat('GAT201 effect at Time 120 effect')
+summary(results(dds_time, contrast = list(c("GAT201WT.Time120", "GAT201_WT_vs_del")), alpha = 0.05))
+
+cat('GAT201 effect at Time 240 effect')
+summary(results(dds_time, contrast = list(c("GAT201WT.Time240", "GAT201_WT_vs_del")), alpha = 0.05))
+```
+
+# Q2: K-mers Analysis
+
+```{r}
+filter_dds_df <- function(gene_nb, t){
+  
+  df_de <- gene_nb %>% pivot_longer(cols = starts_with('CNAG'),
+                                      names_to = 'Gene',
+                                      values_to = 'Counts') %>%
+    filter(Time == t) %>% # filtering
+    spread(key = Gene, value = Counts) %>%
+    column_to_rownames("Title") %>%
+    select(-c(colnames(features)[-1], "log_median_nb")) %>% 
+    t() %>%
+    as.data.frame()
+  
+  # coldata
+  features_de <- features_all %>% filter(Time == t)
+  
+  # rearranging data
+  idx <- match(colnames(df_de), rownames(features_de))
+  features_de <- features_de[idx,]
+  
+  return(list(df_de = df_de, features_de = features_de))
+}
+```
+
+## Step 1: Calculate log2FC
+
+From Q1, we know that GAT201 effect is most prominent in time 120 and 240. Main condition effect on gene count is signifcant for some genes so it is included in the design matrix to control for it. However, condition effect on GAT201 effect is very small. Therefore, it is okay to not model the interaction term between GAT201 and condition.
+
+```{r}
+df_list_240 <- filter_dds_df(gene_nb, 240)
+df_list_120 <- filter_dds_df(gene_nb, 120)
+```
+
+```{r}
+# time 240
+dds_mers_240 <- DESeqDataSetFromMatrix(countData = df_list_240$df_de,
+                              colData = df_list_240$features_de,
+                              design = ~ Condition + GAT201)
+
+# pre-filtering: removing rows with low gene counts
+# keeping rows that have at least 100 reads total
+# higher threshold for normal approximation of log2fc distribution
+keep_mers_240 <- rowSums(counts(dds_mers_240)) >= 100
+dds_mers_240 <- dds_mers_240[keep_mers_240,]
+
+# set the factor level
+# tell DESeq2 that reference level is untreated (to compare with treated)
+dds_mers_240$GAT201 <- relevel(dds_mers_240$GAT201, ref = "del")
+
+dds_mers_240 <- DESeq(dds_mers_240)
+```
+
+```{r}
+# Time 120
+dds_mers_120 <- DESeqDataSetFromMatrix(countData = df_list_120$df_de,
+                              colData = df_list_120$features_de,
+                              design = ~ Condition + GAT201)
+
+# pre-filtering: removing rows with low gene counts
+# keeping rows that have at least 100 reads total
+# higher threshold for normal approximation of log2fc distribution
+keep_mers_120 <- rowSums(counts(dds_mers_120)) >= 100
+dds_mers_120 <- dds_mers_120[keep_mers_120,]
+
+# set the factor level
+# tell DESeq2 that reference level is untreated (to compare with treated)
+dds_mers_120$GAT201 <- relevel(dds_mers_120$GAT201, ref = "del")
+
+dds_mers_120 <- DESeq(dds_mers_120)
+```
+
+```{r}
+# coefficient of GAT201 is the log2FC
+res_mers <- results(dds_mers_240, name = "GAT201_WT_vs_del", alpha = 0.05)
+log2fc <- data.frame(Gene = rownames(res_mers), 
+                         log2fc = res_mers$log2FoldChange)
+# head(res_mers)
+# summary(res_mers)
+```
+
+```{r}
+# coefficient of GAT201 is the log2FC
+res_mers_120 <- results(dds_mers_120, name = "GAT201_WT_vs_del", alpha = 0.05)
+log2fc_120 <- data.frame(Gene = rownames(res_mers_120), 
+                         log2fc = res_mers_120$log2FoldChange)
+# head(res_mers_120)
+# summary(res_mers_120)
+```
+
+```{r}
+par(mfrow=c(2,2))
+# check distribution of lfc
+hist(res_mers$log2FoldChange, main = "Histogram of LFC at Time 240",
+     xlab = "LFC")
+qqnorm(res_mers$log2FoldChange, main = "Normal Q-Q Plot of LFC at Time 240")
+qqline(res_mers$log2FoldChange)
+
+hist(res_mers_120$log2FoldChange, main = "Histogram of LFC at Time 120",
+     xlab= "LFC")
+qqnorm(res_mers_120$log2FoldChange, main = "Normal Q-Q Plot of LFC at Time 120")
+qqline(res_mers_120$log2FoldChange)
+```
+
+### Check estimate stability by simulation/CI
+
+```{r}
+# simulate each beta
+start <- Sys.time()
+nsim <- 50
+log2fc_sim <- Map(function(x, y) rnorm(nsim, mean = x, sd = y), 
+                  res_mers$log2FoldChange,
+                  res_mers$lfcSE)
+
+# transpose the list
+sim <- as.list(as.data.frame(t(as.data.frame(log2fc_sim))))
+# change to data frame
+for (i in 1:length(sim)){
+  sim[[i]] <- data.frame(Gene = rownames(res_mers), log2fc = sim[[i]])
+}
+Sys.time() - start
+```
+
+```{r}
+# simulate each beta
+start <- Sys.time()
+log2fc_sim_120 <- Map(function(x, y) rnorm(nsim, mean = x, sd = y), 
+                  res_mers_120$log2FoldChange,
+                  res_mers_120$lfcSE)
+
+# transpose the list
+sim_120 <- as.list(as.data.frame(t(as.data.frame(log2fc_sim_120))))
+# change to data frame
+for (i in 1:length(sim)){
+  sim_120[[i]] <- data.frame(Gene = rownames(res_mers_120), 
+                             log2fc_120 = sim_120[[i]])
+}
+Sys.time() - start
+```
+
+## Step 2: Model Log2FC as Gaussian Explained by K-mers
+
+### 2.1 Model L2FC \~ Normal
+
+```{r}
+select_motif <- function(log2fc, df_mer_agg){
+  # create df
+  # attach log2fc to aggregate df
+  df_mer_fc <- merge(x = log2fc, df_mer_agg)
+  
+  # input 
+  formula <- paste("~", paste(colnames(df_mer_fc)[-c(1:2)], collapse = "+"))
+  x <- model.matrix(as.formula(formula), data = df_mer_fc)
+  
+  # model log2fc as normal distribution with lasso regression to select motif
+  m_l2fc <- cv.glmnet(x=x, y=df_mer_fc$log2fc, family = "gaussian", alpha = 1)
+  
+  # non significant motif
+  nonsig_motif <- colnames(x)[which(coef(m_l2fc, s = m_l2fc$lambda.min) == 0)]
+  
+  return(nonsig_motif)
+}
+```
+
+```{r}
+start <- Sys.time()
+nonsig_motif <- list()
+
+# 2 mers
+nonsig_motif$mer2 <- select_motif(log2fc, df_2mer_agg)
+
+# 3 mers
+nonsig_motif$mer3 <- select_motif(log2fc, df_3mer_agg)
+
+# 4 mers
+nonsig_motif$mer4 <- select_motif(log2fc, df_4mer_agg)
+
+# 5 mers
+nonsig_motif$mer5 <- select_motif(log2fc, df_5mer_agg)
+Sys.time() - start
+```
+
+time 120
+
+```{r}
+nonsig_motif_120 <- list()
+
+# 2 mers
+nonsig_motif_120$mer2 <- select_motif(log2fc_120, df_2mer_agg)
+
+# 3 mers
+nonsig_motif_120$mer3 <- select_motif(log2fc_120, df_3mer_agg)
+
+# 4 mers
+nonsig_motif_120$mer4 <- select_motif(log2fc_120, df_4mer_agg)
+
+# 5 mers
+nonsig_motif_120$mer5 <- select_motif(log2fc_120, df_5mer_agg)
+
+```
+
+## Stability Check
+
+```{r}
+# check result stability
+# create proportion of times that nonsig_motif is chosen
+# 2 mers
+nonsig_motif_sim_2mer <- sort(table(unlist(lapply(sim, select_motif, df_2mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_3mer <- sort(table(unlist(lapply(sim, select_motif, df_3mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_4mer <- sort(table(unlist(lapply(sim, select_motif, df_4mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_5mer <- sort(table(unlist(lapply(sim, select_motif, df_5mer_agg)))/nsim, decreasing = TRUE)
+```
+
+```{r}
+# check result stability
+# create proportion of times that nonsig_motif is chosen
+# 2 mers
+nonsig_motif_sim_2mer_120 <- sort(table(unlist(lapply(sim_120, select_motif, df_2mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_3mer_120 <- sort(table(unlist(lapply(sim_120, select_motif, df_3mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_4mer_120 <- sort(table(unlist(lapply(sim_120, select_motif, df_4mer_agg)))/nsim, decreasing = TRUE)
+
+
+nonsig_motif_sim_5mer_120 <- sort(table(unlist(lapply(sim_120, select_motif, df_5mer_agg)))/nsim, decreasing = TRUE)
+```
+
+```{r}
+stability_check <- function(nonsig_motif, nonsig_motif_sim){
+  # get index position of chosen nonsig_motif in dictionary
+  pos <- match(nonsig_motif, names(nonsig_motif_sim))
+  
+  if (length(pos) < 2){
+    data <- data.frame(Motif = names(nonsig_motif_sim[1]), 
+                       Proportion = nonsig_motif_sim[1])
+  }
+  
+  else{
+    # get proportion of occurence of chosen nonsig motifs
+    data <- as.data.frame(sort(nonsig_motif_sim[pos], decreasing = TRUE))
+    colnames(data) <- c("Motif", "Proportion")
+  }
+  
+  # create plot
+  p <- ggplot()+
+    geom_bar(aes(x=Motif, y=Proportion), data = data, stat = 'identity') +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    geom_hline(yintercept=0.5, color = "red")
+  return(list(data = data, plot = p))
+}
+```
+
+```{r}
+# how common is our result?
+stab_2mer <- stability_check(nonsig_motif$mer2, nonsig_motif_sim_2mer)
+stab_3mer <- stability_check(nonsig_motif$mer3, nonsig_motif_sim_3mer)
+stab_4mer <- stability_check(nonsig_motif$mer4, nonsig_motif_sim_4mer)
+stab_5mer <- stability_check(nonsig_motif$mer5, nonsig_motif_sim_5mer)
+
+stab_2mer$plot <- stab_2mer$plot + ggtitle("2-mer Motifs")
+stab_3mer$plot <- stab_3mer$plot + ggtitle("3-mer Motifs")
+stab_4mer$plot <- stab_4mer$plot + ggtitle("4-mer Motifs")
+stab_5mer$plot <- stab_5mer$plot + ggtitle("5-mer Motifs")
+
+
+p_stab_240 <- stab_2mer$plot + stab_3mer$plot + stab_4mer$plot + stab_5mer$plot
+ggsave("stab_240.pdf", plot = p_stab_240, width = 10, height = 6, units = "in", dpi=300)
+
+```
+
+```{r}
+stab_2mer_120 <- stability_check(nonsig_motif_120$mer2, nonsig_motif_sim_2mer_120)
+stab_3mer_120 <- stability_check(nonsig_motif_120$mer3, nonsig_motif_sim_3mer_120)
+stab_4mer_120 <- stability_check(nonsig_motif_120$mer4, nonsig_motif_sim_4mer_120)
+stab_5mer_120 <- stability_check(nonsig_motif_120$mer5, nonsig_motif_sim_5mer_120)
+
+
+stab_2mer_120$plot <- stab_2mer_120$plot + ggtitle("2-mer Motifs")
+stab_3mer_120$plot <- stab_3mer_120$plot + ggtitle("3-mer Motifs")
+stab_4mer_120$plot <- stab_4mer_120$plot + ggtitle("4-mer Motifs")
+stab_5mer_120$plot <- stab_5mer_120$plot + ggtitle("5-mer Motifs")
+
+
+p_stab_120 <- stab_2mer_120$plot + stab_3mer_120$plot + stab_4mer_120$plot + stab_5mer_120$plot
+ggsave("stab_120.pdf", plot = p_stab_120, width = 10, height = 6, units = "in", dpi=300)
+
+```
+
+Results are stable! All non significant motif appears around \>= 50% of the time in simulation.
+
+## Step 3: Model Gene Counts with Chosen Motif
+
+### Data (NB)
+
+```{r}
+df_stack <- gene_nb %>% pivot_longer(cols = starts_with('CNAG'),
+                                    names_to = 'Gene',
+                                    values_to = 'Counts')
+
+df_stack_2mers <- merge(x = df_stack, y = df_2mer_agg, by='Gene')
+df_stack_3mers <- merge(x = df_stack, y = df_3mer_agg, by='Gene')
+df_stack_4mers <- merge(x = df_stack, y = df_4mer_agg, by='Gene')
+df_stack_5mers <- merge(x = df_stack, y = df_5mer_agg, by='Gene')
+
+# combine all
+df_stack_mers <- df_stack_2mers %>% cbind(., df_stack_3mers[-c(1:7)]) %>%
+  cbind(., df_stack_4mers[-c(1:7)]) %>% cbind(., df_stack_5mers[-c(1:7)])
+```
+
+### Define Function to make formula
+
+```{r}
+# make formula
+make_formula <- function(df_stack_mers){
+  kmers <- colnames(df_stack_mers)[-c(1:7)]
+
+  form <- paste(
+    "Counts ~ Condition+",
+    paste(
+      "(", paste(kmers, collapse = "+"), ")*GAT201"
+    )
+  )
+  return(form)
+}
+
+```
+
+### Fit glm.nb with thinned out motifs
+
+```{r}
+glmnb_kmers <- function(df_stack_mers, nonsig_motif, log2fc, time = 240){
+  # make data
+  # since motif is chosen based on modelling l2fc at time 240
+  # only choose genes with counts > 100 (genes used to choose kmers)
+  data <- df_stack_mers %>% filter(Time == time) %>%
+    filter(Gene %in% log2fc$Gene)
+  
+  # remove non chosen motives
+  data <- data[,!(names(data) %in% nonsig_motif)]
+  
+  
+  # input
+  form <- paste(make_formula(data), "+offset(log_median_nb)")
+  
+  # run glm.nb model
+  m <- glm.nb(as.formula(form), data = data)
+  summ_m <- summary(m)
+  
+  # boolean mask of significant p values
+  sig_var_mask <- sort(summ_m$coefficients[-1,4]) < 0.05
+  
+  # select significant variables
+  all_sig_var <- names(sig_var_mask)[sig_var_mask]
+  
+  # get significant interactions
+  sig_inter <- all_sig_var[grep(":", all_sig_var)]
+    
+  return(list(model = m, sig_inter = sig_inter))
+}
+```
+
+Run model for all kmers
+
+```{r}
+# 2 mers
+res_2mers <- glmnb_kmers(df_stack_mers = df_stack_2mers, 
+                       nonsig_motif= nonsig_motif$mer2, 
+                       log2fc = log2fc, 
+                       time = 240)
+res_2mers$sig_inter
+```
+
+```{r}
+res_3mers <- glmnb_kmers(df_stack_mers = df_stack_3mers, 
+                       nonsig_motif= nonsig_motif$mer3, 
+                       log2fc = log2fc, 
+                       time = 240)
+res_3mers$sig_inter
+```
+
+```{r}
+start <- Sys.time()
+res_4mers <- glmnb_kmers(df_stack_mers = df_stack_4mers, 
+                       nonsig_motif= nonsig_motif$mer4, 
+                       log2fc = log2fc, 
+                       time = 240)
+Sys.time()-start
+
+res_4mers$sig_inter
+```
+
+```{r}
+start <- Sys.time()
+res_5mers <- glmnb_kmers(df_stack_mers = df_stack_5mers, 
+                       nonsig_motif= nonsig_motif$mer5, 
+                       log2fc = log2fc, 
+                       time = 240)
+Sys.time() - start
+
+res_5mers$sig_inter
+```
+
+Time 120
+
+```{r}
+# 2 mers
+res_2mers_120 <- glmnb_kmers(df_stack_mers = df_stack_2mers, 
+                       nonsig_motif= nonsig_motif_120$mer2, 
+                       log2fc = log2fc_120, 
+                       time = 120)
+res_2mers_120$sig_inter 
+```
+
+```{r}
+res_3mers_120 <- glmnb_kmers(df_stack_mers = df_stack_3mers, 
+                       nonsig_motif= nonsig_motif_120$mer3, 
+                       log2fc = log2fc_120, 
+                       time = 120)
+res_3mers_120$sig_inter
+```
+
+```{r}
+res_4mers_120 <- glmnb_kmers(df_stack_mers = df_stack_4mers, 
+                       nonsig_motif= nonsig_motif_120$mer4, 
+                       log2fc = log2fc_120, 
+                       time = 120)
+res_4mers_120$sig_inter
+```
+
+```{r}
+res_5mers_120 <- glmnb_kmers(df_stack_mers = df_stack_5mers, 
+                       nonsig_motif= nonsig_motif_120$mer5, 
+                       log2fc = log2fc_120, 
+                       time = 120)
+res_5mers_120$sig_inter
+```
+
+# Store in list
+
+```{r}
+res_list_2mer <- list(Time_120 = substr(res_2mers_120$sig_inter,start=1,stop=2),
+                      Time_240 = substr(res_2mers$sig_inter,start=1,stop=2))
+
+res_list_3mer <- list(Time_120 = substr(res_3mers_120$sig_inter,start=1,stop=3),
+                      Time_240 = substr(res_3mers$sig_inter,start=1,stop=3))
+
+res_list_4mer <- list(Time_120 = substr(res_4mers_120$sig_inter,start=1,stop=4),
+                      Time_240 = substr(res_4mers$sig_inter,start=1,stop=4))
+
+res_list_5mer <- list(Time_120 = substr(res_5mers_120$sig_inter,start=1,stop=5),
+                      Time_240 = substr(res_5mers$sig_inter,start=1,stop=5))
+
+```
+
+```{r}
+plot_venn <- function(res_list, title = "k-mer Motifs"){
+  # get data frame
+  re <- list_to_data_frame(res_list)
+  # plot venn
+  p <- ggplot(re, aes(A = time_240, B = time_120)) +
+    geom_venn() +
+    coord_fixed() +
+    theme_void() +
+    ggtitle(title)
+  return(p)
+}
+```
+
+```{r}
+# Venn diagram
+venn2 <- plot_venn(res_list_2mer, "2-mer Model")
+venn3 <- plot_venn(res_list_3mer, "3-mer Model")
+venn4 <- plot_venn(res_list_4mer, "4-mer Model")
+venn5 <- plot_venn(res_list_5mer, "5-mer Model")
+p_venn <- venn2 + venn3 + venn4 + venn5
+ggsave("venn.pdf", plot = p_venn, width = 10, height = 6, units = "in", dpi=300)
+```
+
+# Q3: Minimum K-mers
+
+Time 240
+
+## Step 1: select k mers
+
+```{r}
+start <- Sys.time()
+nonsig_motif_all <- select_motif(log2fc, df_allmer_agg)
+Sys.time() - start
+```
+
+## Step 2: model gene expression level
+
+```{r}
+# all mers
+start <- Sys.time()
+res_mers_all <- glmnb_kmers(df_stack_mers = df_stack_mers, 
+                       nonsig_motif= nonsig_motif_all, 
+                       log2fc = log2fc, 
+                       time = 240)
+Sys.time() - start
+res_mers_all$sig_inter
+```
+
+## Clustering: Time 240
+
+### Get active set and new correlation matrix
+
+```{r}
+d <- df_allmer_agg[-1]
+
+# remove non significant motifs
+d_sig <- d[, !(names(d) %in% nonsig_motif_all)] 
+
+sig_all <- colnames(d_sig)
+
+# get correlation matrix with active set
+melted_c_mat_new <- filter(melted_corr_mat_kmer, Var1 %in% sig_all)
+
+# plotting the correlation heatmap
+p1 <- ggplot(data = melted_c_mat_new, aes(x=Var1, y=Var2, 
+                                   fill=value)) + 
+geom_tile() +
+  scale_fill_gradient2(low = '#465DAA', high = '#AF011C', mid = 'white', 
+                       midpoint = 0, limit = c(-1,1), space = 'Lab', 
+                       name='correlation')
+```
+
+### Get set of strongly correlated motifs
+
+```{r}
+# set threshold
+s1 <- 0.5
+f_melted_c_mat_new <- filter(melted_c_mat_new, value >= s1)
+new_motif <- as.character(unique(f_melted_c_mat_new$Var2))
+sig_all_c <- unique(c(sig_all, new_motif))
+```
+
+### Clustering
+
+```{r}
+d_clust <- filter(df_allmer_agg, Gene %in% rownames(df))[-1]
+d_clust <- d_clust[,(names(d_clust) %in% sig_all_c)]
+# a <- hclust(dist(as.matrix(d_clust)))
+# cut <- cutree(a, k = 5)
+```
+
+```{r}
+p_elbow <- fviz_nbclust(t(d_clust), kmeans, method = 'wss')
+ggsave("elbow.pdf", plot = p_elbow, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+k = 4
+kmeans_mer = kmeans(t(d_clust), centers = 4, nstart = 50)
+p_cluster <- fviz_cluster(kmeans_mer, data = t(d_clust), geom = 'point')
+
+ggsave("p_cluster.pdf", plot = p_cluster, width = 10, height = 6, units = "in", dpi=300)
+```
+
+```{r}
+cluster <- list()
+for (i in 1:k){
+  cluster[[i]] <- d_clust[,names(which(kmeans_mer$cluster == i))]
+  cluster[[i]]$m <- rowMeans(cluster[[i]])
+}
+```
+
+### Get new data
+
+```{r}
+df_mers_final <- data.frame(Gene= df_2mer_agg$Gene)
+
+for (i in 1:k){
+  df_mers_final[,paste0("cluster", i)] <- cluster[[i]]$m
+}
+
+df_stack_final <-  merge(x = df_stack, y = df_mers_final, by='Gene')
+```
+
+Cluster Model
+
+```{r}
+res_mers_final_240 <- glmnb_kmers(df_stack_mers = df_stack_final, 
+                       nonsig_motif= NULL, 
+                       log2fc = log2fc, 
+                       time = 240)
+res_mers_final_240$sig_inter
+
+```
+
+AIC
+
+```{r}
+aic1 <- res_mers_final_240$model$aic
+aic2 <- res_2mers$model$aic
+aic3 <- res_3mers$model$aic
+aic4 <- res_4mers$model$aic
+aic5 <- res_5mers$model$aic
+```
+
+Residual Analysis
+
+```{r}
+all_model_list <- list(m1=res_mers_final_240$model,
+                       m2=res_2mers$model,
+                       m3=res_3mers$model,
+                       m4=res_4mers$model,
+                       m5=res_5mers$model
+                       )
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(all_model_list$m1)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(all_model_list$m2)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(all_model_list$m3)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(all_model_list$m4)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(all_model_list$m5)
+```
+
+Visualisation
+
+```{r}
+# plot log transformed p values
+plot_pval <- function(res_model, top, k){
+  idx <- grep(":", names(res_model$coefficients))
+  p_val <- summary(res_model)$coefficients[idx,4]
+  Motif <- names(p_val)
+  sig <- p_val <= 0.05
+  dat <- data.frame(Motif = substr(Motif, start=1, stop=k),
+                    log_p = -log(p_val),
+                    Significant = sig)
+  dat$chosen <- dat$Motif %in% top
+  
+  
+  p <- ggplot(dat, aes(x=Motif, y=log_p)) +
+    geom_point(aes(colour = Significant)) +
+    ggnewscale::new_scale_colour() + 
+    geom_point(data=dat %>% filter(chosen == TRUE), 
+             pch=21, size=4, stroke = 2, aes(colour = Motif))+
+    labs(x = "Motif", y = "log(p-values)")+
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(p)
+}
+```
+
+```{r}
+finalp1 <- plot_pval(res_mers_final_240$model, c('cluster1', 'cluster3', 'cluster4'), 8)
+finalp2 <- plot_pval(res_2mers$model, c('AT', 'TA', 'AC', 'CA', 'AG'), 2)
+finalp3 <- plot_pval(res_3mers$model, c('AAT', 'TAA', 'CAA', 'GAA', 'AAG'), 3)
+finalp4 <- plot_pval(res_4mers$model, c('AGAT', 'GTCA', 'GCTA', 'AATT', 'ACGC'), 4)
+finalp5 <- plot_pval(res_5mers$model, c('AGATC', 'ATTGC', 'CAATA', 'AGGGA', 'GTTTA'), 5)
+
+ggsave("finalp5.pdf", plot = finalp5, width = 13, height = 6, units = "in", dpi=300)
+ggsave("finalp4.pdf", plot = finalp4, width = 13, height = 6, units = "in", dpi=300)
+ggsave("finalp3.pdf", plot = finalp3, width = 13, height = 6, units = "in", dpi=300)
+ggsave("finalp2.pdf", plot = finalp2, width = 13, height = 6, units = "in", dpi=300)
+ggsave("finalp1.pdf", plot = finalp1, width = 13, height = 6, units = "in", dpi=300)
+
+```
